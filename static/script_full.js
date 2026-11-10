@@ -31,6 +31,7 @@ fetch("/tag_options")
 
 const MAX_CLIPS = 4;
 const CLIP_COLORS = ["#1e90ff", "#ff4d4d", "#2ecc71", "#f5a623"];
+const PLOT_FONT_FAMILY = "Kanit, sans-serif";
 
 let clips = [];      // [{ id: 1, color: "#1e90ff" }, ...] in display order
 let nextClipId = 1;  // ids never get reused, so marker names stay unique
@@ -872,6 +873,7 @@ document.addEventListener("DOMContentLoaded", function () {
         aspectratio: { x: 1, y: 1, z: 1 }, // This enforces the same scaling factor on all axes
       },
       font: {
+        family: PLOT_FONT_FAMILY,
         color: "white",
       },
     };
@@ -1138,6 +1140,7 @@ document.addEventListener("DOMContentLoaded", function () {
         gridcolor: "#888",
       },
       font: {
+        family: PLOT_FONT_FAMILY,
         color: "white",
       },
     };
@@ -1245,7 +1248,7 @@ document.addEventListener("DOMContentLoaded", function () {
     const axis = { color: "white", gridcolor: "#222" };
     const layout = {
       title: "RCIN: Maneuver / Workload / Timer Reset",
-      font: { color: "white" },
+      font: { family: PLOT_FONT_FAMILY, color: "white" },
       margin: { l: 70, r: 10, b: 40, t: 40 },
       paper_bgcolor: "#05060d",
       plot_bgcolor: "#05060d",

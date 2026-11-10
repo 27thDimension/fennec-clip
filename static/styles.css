@@ -1,3 +1,7 @@
+:root {
+  --font-family: "Kanit", sans-serif;
+}
+
 /* Reset some default browser styles */
 body,
 h1,
@@ -8,7 +12,6 @@ button {
   font-size: 100%;
   font: inherit;
   vertical-align: baseline;
-  font-family: "Roboto", sans-serif;
 }
 
 body {
@@ -16,7 +19,14 @@ body {
   background-size: 200% 200%;
   /* The background size is twice as large as the element to allow for movement */
   color: white;
-  font-family: Arial, sans-serif;
+  font-family: var(--font-family);
+}
+
+button,
+input,
+select,
+textarea {
+  font-family: inherit;
 }
 
 /* Container settings */
@@ -87,6 +97,15 @@ h1 {
 }
 
 /* Vis Timeline Custom Styles for Dark Theme */
+.vis-timeline,
+div.vis-tooltip,
+body .js-plotly-plot .plotly,
+body .js-plotly-plot .plotly div,
+body .js-plotly-plot .plotly input,
+body .js-plotly-plot .plotly button {
+  font-family: var(--font-family);
+}
+
 .vis-timeline {
   border: none;
   color: #ffffff;
@@ -450,7 +469,7 @@ button[onclick*="exportData('pkl')"]:hover {
   /* Start shifted down */
   transition: opacity 0.25s ease-out, transform 0.25s ease-out;
   /* Smooth transition for fade-in and shift */
-  font-family: "Open Sans", sans-serif;
+  font-family: inherit;
 }
 
 .status-message:hover {
