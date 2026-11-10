@@ -78,6 +78,7 @@
         </div>
         <div class="flex-item" style="max-width: 500px">
           <div class="time-series-container">
+            <div id="rcinPlot" class="plot rcin-plot"></div>
             <div id="xTimeSeries" class="plot"></div>
             <div id="yTimeSeries" class="plot"></div>
             <div id="zTimeSeries" class="plot"></div>
@@ -92,13 +93,9 @@
           <div id="fileList"></div>
         </div>
       </div>
-      <div class="time-display-wrapper">
-        <div class="time-display-container time-display-left">
-          <div id="startTimeDisplay" class="time-display"></div>
-        </div>
-        <div class="time-display-container time-display-right">
-          <div id="endTimeDisplay" class="time-display"></div>
-        </div>
+      <div class="clip-panel">
+        <div id="clipList" class="clip-list"></div>
+        <button id="addClipBtn" class="add-clip-button">+ Add clip</button>
       </div>
       <div class="flex-item">
         <div id="visualization"></div>

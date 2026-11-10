@@ -10,6 +10,7 @@ let gpsData;
 let RCOUData;
 let globalFileName;
 let latestJobId = 0;
+let rcinInfo = null;
 
 let timeoutId = null;
 function throttle(func, delay) {
@@ -20,6 +21,78 @@ function throttle(func, delay) {
     func();
     timeoutId = null;
   }, delay);
+}
+
+let TAGS = { default: "untagged", maneuver: [], workload: [] };
+fetch("/tag_options")
+  .then((r) => r.json())
+  .then((o) => { TAGS = o; })
+  .catch((err) => console.error("Failed to load tag options:", err));
+
+const MAX_CLIPS = 4;
+const CLIP_COLORS = ["#1e90ff", "#ff4d4d", "#2ecc71", "#f5a623"];
+
+let clips = [];      // [{ id: 1, color: "#1e90ff" }, ...] in display order
+let nextClipId = 1;  // ids never get reused, so marker names stay unique
+
+function clipMarkerIds(clip) {
+  return { start: `clip${clip.id}_start`, end: `clip${clip.id}_end` };
+}
+
+// Read one clip's range (in ms) straight from the timeline markers.
+// min/max means a start marker dragged past its end marker still works.
+function getClipRange(clip) {
+  const ids = clipMarkerIds(clip);
+  const a = timeline.getCustomTime(ids.start).getTime();
+  const b = timeline.getCustomTime(ids.end).getTime();
+  return { start: Math.min(a, b), end: Math.max(a, b) };
+}
+
+function getAllRanges() {
+  return clips.map(getClipRange);
+}
+
+function styleAllClipMarkers() {
+  clips.forEach((clip) => {
+    const ids = clipMarkerIds(clip);
+    [ids.start, ids.end].forEach((id) => {
+      const bar = document.querySelector(`.vis-custom-time.${id}`);
+      if (bar) bar.style.backgroundColor = clip.color;
+    });
+  });
+}
+
+// Labels follow list position (S1/E1, S2/E2...), matching the backend's clip_id
+function labelClips() {
+  clips.forEach((clip, i) => {
+    const ids = clipMarkerIds(clip);
+    timeline.setCustomTimeMarker(`S${i + 1}`, ids.start);
+    timeline.setCustomTimeMarker(`E${i + 1}`, ids.end);
+  });
+}
+
+function addClip(startTime, endTime) {
+  if (!timeline || clips.length >= MAX_CLIPS) return null;
+  // first palette color not already in use
+  const color = CLIP_COLORS.find((c) => !clips.some((k) => k.color === c));
+  const clip = { id: nextClipId++, color, maneuver: TAGS.default, workload: TAGS.default };
+  const ids = clipMarkerIds(clip);
+  timeline.addCustomTime(startTime, ids.start);
+  timeline.addCustomTime(endTime, ids.end);
+  clips.push(clip);
+  setTimeout(styleAllClipMarkers, 50); // slight delay to ensure DOM is ready
+  return clip;
+}
+
+function removeClip(clipId) {
+  if (!timeline || clips.length <= 1) return;   // always keep one clip
+  const idx = clips.findIndex((c) => c.id === clipId);
+  if (idx === -1) return;
+  const ids = clipMarkerIds(clips[idx]);
+  timeline.removeCustomTime(ids.start);
+  timeline.removeCustomTime(ids.end);
+  clips.splice(idx, 1);
+  labelClips();   // remaining clips renumber: S1/E1, S2/E2...
 }
 
 // Get the modal
@@ -140,6 +213,8 @@ document.addEventListener("DOMContentLoaded", function () {
     Plotly.purge("rcouC3TimeSeries");
     Plotly.purge("rcouC4TimeSeries");
     Plotly.purge("rcouC8TimeSeries");
+    Plotly.purge("rcinPlot");
+    document.getElementById("rcinPlot").innerHTML = "";
   }
 
   function resetCharts() {
@@ -180,6 +255,8 @@ document.addEventListener("DOMContentLoaded", function () {
     Plotly.purge("rcouC3TimeSeries");
     Plotly.purge("rcouC4TimeSeries");
     Plotly.purge("rcouC8TimeSeries");
+    Plotly.purge("rcinPlot");
+    document.getElementById("rcinPlot").innerHTML = "";
   }
 
   function fetchFileList() {
@@ -414,6 +491,8 @@ document.addEventListener("DOMContentLoaded", function () {
   function initVisualizations() {
     initTimeline();
     initTimeSeriesPlots(imuData);
+    initRcinPlot();
+    
     // console.log("originalGpsColors:", originalGpsColors);
     init3DChart();
     fetchFileList();
@@ -712,6 +791,7 @@ document.addEventListener("DOMContentLoaded", function () {
           255 - (255 * i) / numPoints
         )})`
     );
+    rcinInfo = data["RCIN_INFO"] || null;
   }
 
   // Helper function to format the date
@@ -859,7 +939,15 @@ document.addEventListener("DOMContentLoaded", function () {
       },
     ];
 
-    const items = new vis.DataSet([...backgroundItems, ...modeItems]);
+    const timerItems = ((rcinInfo && rcinInfo.timer_events) || []).map((t) => ({
+      start: new Date(t * 1000),
+      content: "T",
+      title: "Timer reset",
+      editable: false,
+      className: "timer-reset",
+    }));
+
+    const items = new vis.DataSet([...backgroundItems, ...modeItems, ...timerItems]);
 
     const options = {
       min: new Date(timeLabels[0].getTime() - 60000),
@@ -879,75 +967,118 @@ document.addEventListener("DOMContentLoaded", function () {
     // Create the timeline
     timeline = new vis.Timeline(container, items, options);
 
-    // Add custom time bars for start and end
-    timeline.addCustomTime(timeLabels[0], "startMarker");
-    timeline.addCustomTime(timeLabels[timeLabels.length - 1], "endMarker");
+    // New timeline = fresh clip state
+    clips = [];
+    nextClipId = 1;
+    addClip(timeLabels[0], timeLabels[timeLabels.length - 1]);
+    labelClips();
 
-    // Listen to the `timechange` event to update 3D plot
+    // Any clip marker moving triggers one recolor pass
     timeline.on("timechange", function (event) {
-      if (event.id === "startMarker" || event.id === "endMarker") {
-        updateColors(event.time, event.id);
+      if (/^clip\d+_(start|end)$/.test(event.id)) {
+        updateColors();
       }
     });
 
-    styleCustomTimeMarkers();
+    timeline.on("changed", styleAllClipMarkers);
 
-    updateDisplayedTimeRange(timeLabels[0], timeLabels[timeLabels.length - 1]);
+    updateClipReadout(getAllRanges());
   }
 
-  function updateDisplayedTimeRange(start, end) {
-    const startTimeDisplay = document.getElementById("startTimeDisplay");
-    const endTimeDisplay = document.getElementById("endTimeDisplay");
+  function updateClipReadout(ranges) {
+    const list = document.getElementById("clipList");
+    if (!list) return;
+    const fmt = (ms) => new Date(ms).toTimeString().split(" ")[0]; // HH:MM:SS
 
-    const startTimeString = start.toTimeString().split(" ")[0]; // Keep HH:MM:SS
-    const endTimeString = end.toTimeString().split(" ")[0]; // Keep HH:MM:SS
+    const optionsHtml = (list, selected) =>
+    [TAGS.default, ...list]
+      .map((t) => `<option value="${t}" ${t === selected ? "selected" : ""}>${t}</option>`)
+      .join("");
 
-    startTimeDisplay.innerHTML = `Start: ${startTimeString}`;
-    endTimeDisplay.innerHTML = `End: ${endTimeString}`;
+    list.innerHTML = clips
+      .map((clip, i) => {
+        const r = ranges[i];
+        const secs = Math.round((r.end - r.start) / 1000);
+        return `
+          <div class="clip-row">
+            <span class="clip-swatch" style="background:${clip.color}"></span>
+            <span class="clip-name">Clip ${i + 1}</span>
+            <select class="clip-tag" title="Maneuver" data-field="maneuver" data-clip-id="${clip.id}">
+              ${optionsHtml(TAGS.maneuver, clip.maneuver)}
+            </select>
+            <select class="clip-tag" title="Workload" data-field="workload" data-clip-id="${clip.id}">
+              ${optionsHtml(TAGS.workload, clip.workload)}
+            </select>
+            <span class="clip-times">${fmt(r.start)} &ndash; ${fmt(r.end)}</span>
+            <span class="clip-duration">${secs}s</span>
+            <button class="clip-remove" data-clip-id="${clip.id}"
+              ${clips.length <= 1 ? "disabled" : ""}>&times;</button>
+          </div>`;
+      })
+      .join("");
+
+    document.getElementById("addClipBtn").disabled = clips.length >= MAX_CLIPS;
   }
 
-  function styleCustomTimeMarkers() {
-    setTimeout(() => {
-      const startMarker = document.querySelector(
-        ".vis-custom-time.startMarker"
-      );
-      const endMarker = document.querySelector(".vis-custom-time.endMarker");
+  // One listener on the list handles every remove button, even ones created later
+  document.getElementById("clipList").addEventListener("click", (e) => {
+    const btn = e.target.closest(".clip-remove");
+    if (!btn || !timeline) return;
+    removeClip(Number(btn.dataset.clipId));
+    updateClipReadout(getAllRanges());
+    updateColors();
+  });
 
-      if (startMarker && endMarker) {
-        startMarker.style.backgroundColor = "blue";
-        endMarker.style.backgroundColor = "red";
-      }
-    }, 0);
-  }
+  document.getElementById("clipList").addEventListener("change", (e) => {
+    const sel = e.target.closest(".clip-tag");
+    if (!sel) return;
+    const field = sel.dataset.field;
+    if (field !== "maneuver" && field !== "workload") return;
+    const clip = clips.find((c) => c.id === Number(sel.dataset.clipId));
+    if (clip) clip[field] = sel.value;
+  });
+
+  document.getElementById("addClipBtn").addEventListener("click", () => {
+    if (!timeline) {
+      applyShakeAnimationIfNoTimeline();
+      return;
+    }
+    // Drop the new clip in the middle of what's visible, clamped to the data
+    const dataStart = timeLabels[0].getTime();
+    const dataEnd = timeLabels[timeLabels.length - 1].getTime();
+    const win = timeline.getWindow();
+    let lo = Math.max(win.start.getTime(), dataStart);
+    let hi = Math.min(win.end.getTime(), dataEnd);
+    if (hi <= lo) { lo = dataStart; hi = dataEnd; }   // window not over the data
+    const span = hi - lo;
+
+    addClip(new Date(lo + span * 0.4), new Date(lo + span * 0.6));
+    labelClips();
+    updateClipReadout(getAllRanges());
+    updateColors();
+  });
 
   // Update function with color coding for both 3D and time-series charts
-  function updateColors(newTime, markerId) {
+    function updateColors() {
     throttle(() => {
-      let startRange, endRange;
+      if (!timeline) return;
 
-      if (markerId === "startMarker") {
-        startRange = new Date(newTime);
-        endRange = new Date(timeline.getCustomTime("endMarker"));
-      } else {
-        startRange = new Date(timeline.getCustomTime("startMarker"));
-        endRange = new Date(newTime);
-      }
+      // Read marker positions when the callback RUNS, not when it was scheduled
+      const ranges = getAllRanges();
+      updateClipReadout(ranges);
+      updateRcinShading(ranges);
+      
 
-      // Update the displayed time range
-      updateDisplayedTimeRange(startRange, endRange);
-
-      // Update the latest job ID and send it to the worker
       latestJobId++;
       colorWorker.postMessage({
         jobId: latestJobId,
         xkf1Data: xkf1Data,
         imuData: imuData,
         RCOUData: RCOUData,
-        startRange: startRange,
-        endRange: endRange,
+        ranges: ranges,
         unselectedAlpha: 0.001,
       });
-    }, 100); // delay of 100 milliseconds
+    }, 100);
   }
 
   // Create a helper function to make a new trace for RCOU data
@@ -1070,6 +1201,76 @@ document.addEventListener("DOMContentLoaded", function () {
       title: "RC Out Channel 8 (RPM Control)",
     });
   }
+  // Turn [{start, end, value}, ...] into points for a step line
+  function segmentsToStep(segments) {
+    const x = [], y = [], text = [];
+    segments.forEach((s) => {
+      x.push(new Date(s.start * 1000));
+      y.push(s.value);
+      text.push(s.name || `level ${s.value}`);
+    });
+    if (segments.length) {
+      const last = segments[segments.length - 1];
+      x.push(new Date(last.end * 1000));   // close the final step
+      y.push(last.value);
+      text.push(text[text.length - 1]);
+    }
+    return { x, y, text };
+  }
+
+  function initRcinPlot() {
+    const el = document.getElementById("rcinPlot");
+    el.innerHTML = "";
+
+    const p = rcinInfo && rcinInfo.present;
+    if (!p || !(p.maneuver || p.workload || p.timer)) {
+      el.innerHTML = '<p class="rcin-empty">No RCIN maneuver/workload data in this log</p>';
+      return;
+    }
+
+    const m = segmentsToStep(rcinInfo.maneuver_segments);
+    const w = segmentsToStep(rcinInfo.workload_segments);
+    const timerX = rcinInfo.timer_events.map((t) => new Date(t * 1000));
+
+    const traces = [
+      { x: m.x, y: m.y, text: m.text, xaxis: "x", yaxis: "y", mode: "lines+markers",
+        line: { shape: "hv", color: "rgb(255,165,0)" }, marker: { size: 5 }, hoverinfo: "x+y+text" },
+      { x: w.x, y: w.y, text: w.text, xaxis: "x", yaxis: "y2", mode: "lines+markers",
+        line: { shape: "hv", color: "rgb(0,200,255)" }, marker: { size: 5 }, hoverinfo: "x+y+text" },
+      { x: timerX, y: timerX.map(() => 1), xaxis: "x", yaxis: "y3", mode: "markers",
+        marker: { symbol: "diamond", size: 10, color: "cyan" },
+        hovertemplate: "Timer reset<extra></extra>" },
+    ];
+
+    const axis = { color: "white", gridcolor: "#222" };
+    const layout = {
+      title: "RCIN: Maneuver / Workload / Timer Reset",
+      font: { color: "white" },
+      margin: { l: 70, r: 10, b: 40, t: 40 },
+      paper_bgcolor: "#05060d",
+      plot_bgcolor: "#05060d",
+      showlegend: false,
+      xaxis: { ...axis, anchor: "y3" },
+      yaxis:  { ...axis, domain: [0.70, 1.0],  title: "Maneuver (C9)" },
+      yaxis2: { ...axis, domain: [0.37, 0.63], title: "Workload (C10)" },
+      yaxis3: { ...axis, domain: [0.0, 0.30],  title: "Timer (C11)", range: [0, 2], showticklabels: false },
+    };
+
+    Plotly.newPlot(el, traces, layout);
+    if (timeline) updateRcinShading(getAllRanges());
+  }
+
+  // Draw each clip as a translucent band behind the RCIN traces
+  function updateRcinShading(ranges) {
+    const el = document.getElementById("rcinPlot");
+    if (!el || !el.data) return;   // nothing plotted (old flight or note shown)
+    const shapes = ranges.map((r, i) => ({
+      type: "rect", xref: "x", yref: "paper",
+      x0: new Date(r.start), x1: new Date(r.end), y0: 0, y1: 1,
+      fillcolor: clips[i].color, opacity: 0.18, line: { width: 0 }, layer: "below",
+    }));
+    Plotly.relayout(el, { shapes });
+  }
 });
 
 function updateLoadingHeaderText(text) {
@@ -1078,6 +1279,7 @@ function updateLoadingHeaderText(text) {
     loadingHeader.textContent = text;
   }
 }
+
 function exportData(format = "excel") {
   if (!timeline) {
     applyShakeAnimationIfNoTimeline();
@@ -1087,32 +1289,32 @@ function exportData(format = "excel") {
   modal.style.display = 'none';
   const selectedFileTypes = JSON.parse(localStorage.getItem('selectedFileTypes')) || [];
 
-  const startMarkerTime = timeline.getCustomTime("startMarker");
-  const endMarkerTime = timeline.getCustomTime("endMarker");
-
-  if (startMarkerTime && endMarkerTime) {
-    const startRange = new Date(startMarkerTime);
-    const endRange = new Date(endMarkerTime);
-
-    const filename = prompt("Enter the filename for the exported data:", "clip");
-    if (filename === null) {
-      return;
-    }
-
-    updateLoadingHeaderText(`Exporting ${filename} to ${format.toUpperCase()}...`);
-
-    const exportData = {
-      start_time: startRange.toISOString(),
-      end_time: endRange.toISOString(),
-      filename: filename,
-      format: format,
-      file_types: selectedFileTypes
-    };
-
-    socket.emit("export_data", exportData);
-  } else {
-    console.error("Start or end marker time not found");
+  const ranges = getAllRanges();
+  if (ranges.length === 0) {
+    console.error("No clips to export");
+    return;
   }
+
+  const filename = prompt("Enter the filename for the exported data:", "clip");
+  if (filename === null) {
+    return;
+  }
+
+  updateLoadingHeaderText(`Exporting ${filename} to ${format.toUpperCase()}...`);
+
+  const payload = {
+    clips: ranges.map((r, i) => ({
+      start_time: new Date(r.start).toISOString(),
+      end_time: new Date(r.end).toISOString(),
+      maneuver: clips[i].maneuver,
+      workload: clips[i].workload,
+    })),
+    filename: filename,
+    format: format,
+    file_types: selectedFileTypes,
+  };
+
+  socket.emit("export_data", payload);
 }
 
 

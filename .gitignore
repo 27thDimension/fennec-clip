@@ -3,3 +3,10 @@
 /uploads/
 /__pycache__/
 /temp_df
+/.export_tmp/
+
+# Local backup / scratch / OS files
+/backend-backup.py
+/rcin_tools_test.py
+.DS_Store
+

@@ -213,13 +213,13 @@ button[onclick*="exportData('pkl')"]:hover {
   /* Firefox 64+ */
 }
 
-.time-display-wrapper {
+/* .time-display-wrapper {
   display: flex;
   justify-content: space-between;
 }
 
 .time-display-container {
-  /* display: inline-block; */
+  display: inline-block;
   height: 18px;
   border-radius: 5px;
   padding: 5px 10px;
@@ -230,15 +230,15 @@ button[onclick*="exportData('pkl')"]:hover {
 
 .time-display {
   font-size: 1rem;
-  /* Increased size */
+  Increased size
   font-weight: bold;
-  /* Bold font */
+  Bold font
   color: rgb(255, 255, 255);
-  /* White text */
+  White text
   margin: 0;
-  /* Remove any default margin */
+  Remove any default margin
   padding: 0;
-  /* Remove any default padding */
+  Remove any default padding
 }
 
 .time-display-left {
@@ -247,7 +247,7 @@ button[onclick*="exportData('pkl')"]:hover {
 
 .time-display-right {
   right: 0;
-}
+} */
 
 @keyframes pulse {
   0% {
@@ -917,4 +917,96 @@ input[type="checkbox"]:focus + label {
     padding-left: 0;
     padding-top: 20px;
   }
+}
+
+.clip-panel {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 5px 0;
+}
+
+.clip-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.clip-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 10px;
+  border-radius: 5px;
+  background-color: rgba(255, 255, 255, 0.1);
+  backdrop-filter: blur(20px);
+  color: #fff;
+  font-size: 0.9rem;
+}
+
+.clip-swatch {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+}
+
+.clip-name { font-weight: bold; }
+.clip-duration { opacity: 0.7; }
+
+/* "all: unset" strips your global button styling; the extra class raises specificity over button:hover */
+.clip-row .clip-remove {
+  all: unset;
+  cursor: pointer;
+  padding: 0 6px;
+  font-size: 1.1rem;
+  line-height: 1;
+  color: #fff;
+  opacity: 0.7;
+  border-radius: 3px;
+}
+
+.clip-row .clip-remove:hover:not(:disabled) {
+  opacity: 1;
+  background: rgba(255, 255, 255, 0.2);
+}
+
+.clip-row .clip-remove:disabled {
+  opacity: 0.2;
+  cursor: not-allowed;
+}
+
+.add-clip-button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.clip-row .clip-tag {
+  background: rgba(0, 0, 0, 0.35);
+  color: #fff;
+  border: 1px solid rgba(255, 255, 255, 0.3);
+  border-radius: 4px;
+  padding: 2px 6px;
+  font-size: 0.85rem;
+}
+
+.clip-row .clip-tag option {
+  background: #222;
+  color: #fff;
+}
+
+.rcin-plot {
+  height: 380px;
+}
+
+.rcin-empty {
+  color: #888;
+  font-size: 0.9rem;
+  text-align: center;
+  padding: 20px 0;
+}
+
+.timer-reset {
+  background-color: rgba(0, 220, 255, 0.85) !important;
+  color: black !important;
 }

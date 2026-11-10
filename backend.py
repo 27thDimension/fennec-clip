@@ -15,6 +15,7 @@ from scipy.interpolate import interp1d
 from pymavlink import mavutil
 from functools import reduce
 from flask_cors import CORS
+from rcin_tools import build_rcin_payload, DEFAULT_TAG, MANEUVER_TAGS, WORKLOAD_TAGS
 import simplejson as json
 import datetime as dt
 import pandas as pd
@@ -29,13 +30,18 @@ import re
 import os
 
 import tempfile
+import shutil
+import zipfile
 
 app = Flask(__name__)
 CORS(app)  # Enable CORS for all routes
 socketio = SocketIO(app, cors_allowed_origins="*")
 
-UPLOAD_FOLDER = "uploads"
-DOWNLOAD_FOLDER = "downloads"
+BASE_DIR = os.path.abspath(os.path.dirname(__file__))
+UPLOAD_FOLDER = os.path.join(BASE_DIR, "uploads")
+DOWNLOAD_FOLDER = os.path.join(BASE_DIR, "downloads")
+EXPORT_TMP_DIR = os.path.join(BASE_DIR, ".export_tmp")
+os.makedirs(EXPORT_TMP_DIR, exist_ok=True)
 current_json_file = None
 
 if not os.path.exists(UPLOAD_FOLDER):
@@ -630,6 +636,7 @@ def convert_bin_to_json(bin_file_path):
 
     # Add fileInfo to JSON output
     json_output["file_info"] = fileInfo
+    json_output["RCIN_INFO"] = build_rcin_payload(global_parsed_data.get("RCIN"))
 
     save_json(json_output, bin_file_path)
     
@@ -667,16 +674,58 @@ def calculate_unix_epoch_time(row):
     gps_milliseconds = row["GMS"]
     return (gps_week * 604800) + (gps_milliseconds / 1000) + 315964800
 
+def safe_tag(tag):
+    """Make a tag safe for filenames; hyphens only, so '_' stays a field separator."""
+    return re.sub(r"[^A-Za-z0-9-]+", "-", str(tag)).strip("-") or DEFAULT_TAG
+
+
+def write_clip_file(data_frames, file_format, final_path, label=""):
+    """Write one clip's DataFrames to final_path (via a private temp dir)."""
+    total_rows = sum(len(df) for df in data_frames.values())
+    rows_written = 0
+    suffix = f" [{label}]" if label else ""
+
+    tmp_dir = tempfile.mkdtemp(dir=EXPORT_TMP_DIR)
+    tmp_path = os.path.join(tmp_dir, os.path.basename(final_path))
+    try:
+        if file_format == "excel":
+            with pd.ExcelWriter(tmp_path, engine="xlsxwriter") as writer:
+                for packet_type, df in data_frames.items():
+                    rows_written += len(df)
+                    pct = int((rows_written / total_rows) * 100) if total_rows > 0 else 0
+                    emit("status", {"message": f"Writing {packet_type} to Excel{suffix}... ({pct}%)",
+                                    "progress": pct, "color": "#20B2AA"}, broadcast=True)
+                    df.to_excel(writer, sheet_name=packet_type, index=False)
+        elif file_format == "hdf5":
+            with pd.HDFStore(tmp_path, mode="w") as hdf_store:
+                for packet_type, df in data_frames.items():
+                    rows_written += len(df)
+                    pct = int((rows_written / total_rows) * 100) if total_rows > 0 else 0
+                    emit("status", {"message": f"Writing {packet_type} to HDF5{suffix}... ({pct}%)",
+                                    "progress": pct, "color": "#20B2AA"}, broadcast=True)
+                    hdf_store.put(packet_type, df, format="table", data_columns=True)
+        elif file_format == "pkl":
+            # write into the temp dir (the old code wrote to ./tmp_dir, so the move below failed)
+            save_all_dataframes(data_frames, tmp_path, output_folder=tmp_dir)
+            emit("status", {"message": f"Writing done already!{suffix} (pkl go brrr)",
+                            "progress": 100, "color": "#20B2AA"}, broadcast=True)
+        else:
+            raise ValueError("Unsupported file format")
+        os.replace(tmp_path, final_path)
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
 
 def convert_bin_to_export(
-    bin_file_path, export_file_path, start_time_unix, end_time_unix, file_format="excel", file_types=[]
+    #bin_file_path, export_file_path, start_time_unix, end_time_unix, file_format="excel", file_types=[]
+    bin_file_path, export_file_path, clips, file_format="excel", file_types=[]
 ):
-    start_time = time.time()
+    t0 = time.time()
 
     print(f"bin_file_path: {bin_file_path}")
     print(f"export_file_path: {export_file_path}")
-    print(f"start_time_unix: {start_time_unix}")
-    print(f"end_time_unix: {end_time_unix}")
+    #print(f"start_time_unix: {start_time_unix}")
+    #print(f"end_time_unix: {end_time_unix}")
+    print(f"clips: {clips}")
 
     mlog = mavutil.mavlink_connection(bin_file_path)
 
@@ -923,89 +972,40 @@ def convert_bin_to_export(
     def unix_to_human_readable(unix_time):
         return datetime.datetime.utcfromtimestamp(unix_time).strftime('%Y-%m-%d %H:%M:%S')
 
-    # Filter DataFrames based on Unix_Epoch_Time
-    for packet_type, df in data_frames.items():
-        # Print the start and end time in human-readable format
-        print(f"Filtering {packet_type} DataFrame")
-        print(f"Start time (Unix): {start_time_unix} ({unix_to_human_readable(start_time_unix)})")
-        print(f"End time (Unix): {end_time_unix} ({unix_to_human_readable(end_time_unix)})")
-        
-        # Filter DataFrame rows where Unix_Epoch_Time is between start_time_unix and end_time_unix
-        df_filtered = df[
-            (df["Unix_Epoch_Time"] >= start_time_unix)
-            & (df["Unix_Epoch_Time"] <= end_time_unix)
-        ]
-        
-        # Print the start and end time of the DataFrame before filtering
-        if not df.empty:
-            print(f"DataFrame Start time: {unix_to_human_readable(df['Unix_Epoch_Time'].iloc[0])}")
-            print(f"DataFrame End time: {unix_to_human_readable(df['Unix_Epoch_Time'].iloc[-1])}")
-        else:
-            print("DataFrame is empty.")
+    full_frames = data_frames    # never overwritten: each clip filters from the originals
 
-        # Print the number of packets in the resulting filtered dataframe
-        print(f"Number of packets after filtering: {len(df_filtered)}\n")
+    # Several clips go into a staging folder and get zipped; one clip is written straight out
+    multi = len(clips) > 1
+    staging_dir = tempfile.mkdtemp(dir=EXPORT_TMP_DIR) if multi else None
+    out_dir = staging_dir if multi else os.path.dirname(export_file_path)
+    base_name, ext = os.path.splitext(os.path.basename(export_file_path))
 
-        # Update the dataframe in the dictionary
-        data_frames[packet_type] = df_filtered
+    written = []
+    for n, clip in enumerate(clips, start=1):
+        print(f"Clip {n}: {unix_to_human_readable(clip['start'])} -> {unix_to_human_readable(clip['end'])} "
+              f"[{clip['maneuver']} / {clip['workload']}]")
+        clip_frames = {}
+        for packet_type, df in full_frames.items():
+            mask = df["Unix_Epoch_Time"].between(clip["start"], clip["end"])
+            clip_frames[packet_type] = df[mask]
+            print(f"  {packet_type}: {int(mask.sum())} rows")
 
+        stem = f"{base_name}_{n}_{safe_tag(clip['maneuver'])}_{safe_tag(clip['workload'])}"
+        out_path = os.path.join(out_dir, stem + ext)
+        write_clip_file(clip_frames, file_format, out_path, label=f"clip {n}/{len(clips)}")
+        written.append(out_path)
 
-    # Calculate the total number of rows across all DataFrames
-    total_rows = sum(len(df) for df in data_frames.values())
-    rows_written = 0
-
-    # Determine file format and save accordingly
-    if file_format == "excel":
-        with pd.ExcelWriter(export_file_path, engine="xlsxwriter") as writer:
-            for packet_type, df in data_frames.items():
-                rows_written += len(df)
-
-                # Calculate progress percentage
-                progress_percentage = int((rows_written / total_rows) * 100) if total_rows > 0 else 0
-                emit(
-                    "status",
-                    {
-                        "message": f"Writing {packet_type} to Excel... ({progress_percentage}%)",
-                        "progress": progress_percentage,
-                        "color": "#20B2AA",
-                    },
-                    broadcast=True,
-                )
-                df.to_excel(writer, sheet_name=packet_type, index=False)
-
-    elif file_format == "hdf5":
-        with pd.HDFStore(export_file_path, mode="w") as hdf_store:
-            for packet_type, df in data_frames.items():
-                rows_written += len(df)
-
-                progress_percentage = int((rows_written / total_rows) * 100) if total_rows > 0 else 0
-
-                emit(
-                    "status",
-                    {
-                        "message": f"Writing {packet_type} to HDF5... ({progress_percentage}%)",
-                        "progress": progress_percentage,
-                        "color": "#20B2AA",
-                    },
-                    broadcast=True,
-                )
-                hdf_store.put(packet_type, df, format="table", data_columns=True)
-    elif file_format == "pkl":
-        save_all_dataframes(data_frames, export_file_path, output_folder='./downloads')
-        emit(
-            "status",
-            {
-                "message": f"Writing done already! (pkl go brrr)",
-                "progress": 100,
-                "color": "#20B2AA",
-            },
-            broadcast=True,
-        )
+    if multi:
+        final_path = os.path.splitext(export_file_path)[0] + ".zip"
+        with zipfile.ZipFile(final_path, "w", zipfile.ZIP_STORED) as zf:   # xlsx is already compressed
+            for p in written:
+                zf.write(p, arcname=os.path.basename(p))
+        shutil.rmtree(staging_dir, ignore_errors=True)
     else:
-        raise ValueError("Unsupported file format")
+        final_path = written[0]    
     
     end_time = time.time()
-    elapsed_time = end_time - start_time
+    elapsed_time = end_time - t0
 
     # Calculate hours, minutes, and seconds
     hours, rem = divmod(elapsed_time, 3600)
@@ -1030,6 +1030,7 @@ def convert_bin_to_export(
         broadcast=True,
     )
 
+    return final_path
 
 
 def save_df_to_json(df):
@@ -1319,6 +1320,37 @@ def get_data_as_csv():
         headers={"Content-disposition": f"attachment; filename={filename}"},
     )
 
+# Joshua (& Claude) addition 10-22-2026 (there are more changes elsewhere too)
+MAX_CLIPS = 5 #Set upper clip limit- can be modified but maybe shouldn't be
+
+
+def parse_clips(raw_clips):
+    """Validate clips list from frontend;
+    returns list of (start_unix, end_unix, maneuver, workload) tuples or raises ValueError."""
+    if not isinstance(raw_clips, list):
+        raise ValueError("No clips provided or invalid format")
+    if len(raw_clips) > MAX_CLIPS:
+        raise ValueError(f"Too many clips provided; max: {MAX_CLIPS}")
+
+    clips = []
+    for i, clip in enumerate(raw_clips):
+        try:
+            start = pd.to_datetime(clip["start_time"]).timestamp()
+            end = pd.to_datetime(clip["end_time"]).timestamp()
+
+        except (KeyError, TypeError, ValueError) as e:
+            raise ValueError(f"Invalid clip data at index {i}: {e}")
+        if start >= end:
+            raise ValueError(f"Clip {i}: start must be before end")
+
+        maneuver = clip.get("maneuver", DEFAULT_TAG)
+        workload = clip.get("workload", DEFAULT_TAG)
+        if maneuver not in MANEUVER_TAGS + [DEFAULT_TAG]:
+            raise ValueError(f"Clip {i}: invalid maneuver '{maneuver}'")
+        if workload not in WORKLOAD_TAGS + [DEFAULT_TAG]:
+            raise ValueError(f"Clip {i}: invalid workload '{workload}'")
+        clips.append({"start": start, "end": end, "maneuver": maneuver, "workload": workload})
+    return clips
 
 @socketio.on("export_data")
 def handle_export_data(json_data):
@@ -1330,8 +1362,8 @@ def handle_export_data(json_data):
         return
 
     # Extract values from json_data
-    start_time = json_data.get("start_time")
-    end_time = json_data.get("end_time")
+    #start_time = json_data.get("start_time")
+    #end_time = json_data.get("end_time")
     raw_filename = json_data.get("filename", "exported_data.xlsx")
     file_format = json_data.get("format", "excel")  # Default to 'excel'
     file_types = json_data.get("file_types", None)
@@ -1351,39 +1383,46 @@ def handle_export_data(json_data):
         return
 
     # Ensure required data is provided
-    if not start_time or not end_time:
-        emit(
-            "status",
-            {
-                "message": "Start time or end time not provided",
-                "progress": 0,
-                "color": "#FF0000",
-            },
-        )
-        return
+    #if not start_time or not end_time:
+    #    emit(
+    #        "status",
+    #        {
+    #            "message": "Start time or end time not provided",
+    #            "progress": 0,
+    #            "color": "#FF0000",
+    #        },
+    #    )
+    #    return
 
     filename = sanitize_filename(raw_filename)
     if not filename.endswith(file_ext):
         filename += file_ext
 
+    try:
+        clips = parse_clips(json_data.get("clips"))
+    except ValueError as e:
+        emit("status", {"message": str(e), "progress": 0, "color": "#FF0000"})
+        return
+
     # Convert start and end times from string to Unix timestamp
-    start_time_unix = pd.to_datetime(start_time).timestamp()
-    end_time_unix = pd.to_datetime(end_time).timestamp()
+    #start_time_unix = pd.to_datetime(start_time).timestamp()
+    #end_time_unix = pd.to_datetime(end_time).timestamp()
 
     # Path for the resulting Excel file
     export_file_path = os.path.join(DOWNLOAD_FOLDER, filename)
 
     if current_bin_file:
-        convert_bin_to_export(
+        final_path = convert_bin_to_export(
             current_bin_file,
             export_file_path,
-            start_time_unix,
-            end_time_unix,
+            #start_time_unix,
+            #end_time_unix,
+            clips,
             file_format,
             file_types=file_types,
         )
         # Check if the file was created successfully
-        if os.path.exists(export_file_path):
+        if final_path and os.path.exists(final_path):
             # Broadcast the file export completion message
             emit(
                 "status",
@@ -1396,7 +1435,7 @@ def handle_export_data(json_data):
             )
 
             # Send the download URL only to the client who initiated the export
-            download_url = f"/downloads/{filename}"  # Construct the download URL
+            download_url = f"/downloads/{os.path.basename(final_path)}"  # Construct the download URL
             emit(
                 "status",
                 {"message": f"Download your file at {download_url}", "url": download_url},
@@ -1534,6 +1573,9 @@ def favicon():
         "static", "favicon.ico", mimetype="image/vnd.microsoft.icon"
     )
 
+@app.route("/tag_options")
+def tag_options():
+    return jsonify(default=DEFAULT_TAG, maneuver=MANEUVER_TAGS, workload=WORKLOAD_TAGS)
 
 if __name__ == "__main__":
-    socketio.run(app, host="0.0.0.0", port=5000, allow_unsafe_werkzeug=True)
+    socketio.run(app, host="0.0.0.0", port=5001, allow_unsafe_werkzeug=True)
